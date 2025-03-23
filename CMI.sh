@@ -1,6 +1,6 @@
 #!/bin/bash
 
-VERSION="0.2.0"
+VERSION="1.1.0"
 LOG="/tmp/CMI_v${VERSION}_$(date '+%d-%m-%Y-%T').log"
 
 CELLFRAME_NODE_CLI_PATH="/opt/cellframe-node/bin/cellframe-node-cli"
@@ -128,6 +128,7 @@ run_cli() {
 
 restart_node ()
 {
+    printf "\n%s Restarting cellframe-node.\n" "---"
     systemctl restart cellframe-node.service
 }
 
@@ -209,6 +210,7 @@ check_correct_arch_in_link()
 {
 _temp=${NODE_DEB_LINK##*-}
 LINK_ARCH=${_temp%.*}
+ARCH=$(dpkg --print-architecture)
 
 if [[ ${ARCH} == ${LINK_ARCH} ]];
 then
@@ -257,6 +259,7 @@ install_node
 install_node()
 {
 echo "--- Installing ${LATEST_FILE_NAME}..."
+echo ""
 DEBIAN_FRONTEND=noninteractive dpkg -i ${LATEST_FILE_NAME}
 
 verify_node_running
@@ -324,13 +327,13 @@ create_cert() {
 }
 
 check_wallet_files() {
-    SCRIPT_DIR=$(dirname "$0")
+    WALLET_DIR=$(echo $HOME)
     WALLETPATH="/opt/cellframe-node/var/lib/wallet/"
-    WALLETFILES=($(find $SCRIPT_DIR -iname '*.dwallet' -type f -printf '%f '))
+    WALLETFILES=($(find ${WALLET_DIR} -iname '*.dwallet' -type f -printf '%f '))
     ARRAY_LEN=${#WALLETFILES[@]}
     if [[ ! -z $WALLETFILES ]]; then
         if [[ $ARRAY_LEN -gt 1 ]]; then
-            echo "--- Found multiple wallets in current directory..."
+            echo "--- Found multiple wallets in ${WALLET_DIR} directory..."
             for i in ${!WALLETFILES[@]}
             do
                 echo -e "\t==> [$i] -- ${WALLETFILES[$i]}"
@@ -338,7 +341,7 @@ check_wallet_files() {
             read -p "--- Which one would you like to restore?: " number
             MAX_VALUE=$(($ARRAY_LEN - 1))
             if [[ $number =~ ^[0-9]$ && ! $number -gt $MAX_VALUE ]]; then
-                cp "$SCRIPT_DIR/${WALLETFILES[$number]}" $WALLETPATH
+                cp "${WALLET_DIR}/${WALLETFILES[$number]}" $WALLETPATH
                 echo "--- Wallet ${WALLETFILES[$number]} restored!"
                 walletname="${WALLETFILES[$number]%.*}"
                 declare -x -g WALLETNAME=$walletname
@@ -350,12 +353,12 @@ check_wallet_files() {
                 check_wallet_files
             fi
         else
-            echo "--- Found .dwallet file current directory, copying to $WALLETPATH..."
+            echo "--- Found .dwallet file in ${WALLET_DIR} directory, copying to $WALLETPATH..."
             for i in ${WALLETFILES[@]}
             do
                 walletname=$(basename "$i" .dwallet)
                 declare -x -g WALLETNAME=$walletname
-                cp "$SCRIPT_DIR/$i" $WALLETPATH
+                cp "${WALLET_DIR}/$i" $WALLETPATH
                 check_wallet_password
                 declare -x -g WALLETADDRESS=$(run_cli wallet info -w $WALLETNAME -net ${NET_NAME} | grep -oP 'addr: \K.*$')
                 configure_node
@@ -481,15 +484,47 @@ configure_node() {
     echo "consensus_debug=true" >> $NET_CONFIG_FILE
 
     echo "--- Modifying cellframe-node configuration..."
+    echo ""
 
     sed -i "s/^debug_mode=.*/debug_mode=true/g" $NODE_CONFIG_FILE
     sed -i "0,/^enabled=.*/s/^enabled=.*/enabled=true/" $NODE_CONFIG_FILE
     sed -i "s/^auto_proc=.*/auto_proc=true/g" $NODE_CONFIG_FILE
 
+    read -p "--- Would you like to change cellframe-node server port? Default value is 8079. (Y/N) " _ch_port
+
+    if [[ ${_ch_port} =~ ^[yY]$ ]];
+    then
+        change_server_port
+    else
+        printf "%s Keeping cellframe-node server port as 8079.\n" "---"
+        _port_num=8079
+    fi
+
     restart_node
     verify_node_running
     check_net_state
     sync_progress
+}
+
+change_server_port()
+{
+    read -p "--- Input new cellframe-node server port value (press ENTER to keep 8079): " _port_num
+    _port_num=${_port_num:-8079}
+
+    if [[ ${_port_num} =~ ^[0-9]*$ ]];
+    then
+        :
+    else
+        echo "--- Invalid input value. Supported characters are 0-9. No spaces."
+        change_server_port
+    fi
+
+    if [[ ${_port_num} == 8079 ]];
+    then
+        continue
+    else
+        sed -i "s/.*8079.*/listen\_address=\[0\.0\.0\.0\:${_port_num}\]/g" $NODE_CONFIG_FILE
+    fi
 }
 
 check_net_state()
@@ -637,6 +672,14 @@ check_token_balance() {
 lock_mtoken() {
     token=${mtoken_array[${NET_NAME}]}
     BALANCE=$(run_cli wallet info -w ${WALLETNAME} -net ${NET_NAME} | grep -B3 -w ${token} | grep coins | cut -d: -f2 | cut -d. -f1)
+
+    if [[ ${NET_NAME} == "KelVPN" ]];
+    then
+        ALLOWED_MIN=100
+    else
+        ALLOWED_MIN=$( run_cli srv_stake list keys -net ${NET_NAME} | grep -w key_delegating_min_value | cut -d: -f2 | cut -d. -f1 | tr -d [:blank:] )
+    fi
+
     printf "%s Your current wallet balance is %s %s \n" "---" ${BALANCE} ${mtoken_array[${NET_NAME}]}
     read -p "Enter the amount which you want to lock for your masternode (no decimals): " mtoken_amount
     if [[ ! ${mtoken_amount} =~ ^[0-9]*$ ]];
@@ -647,6 +690,10 @@ lock_mtoken() {
     then
         printf "%s Entered amount is greater than available %s on wallet! Please try again...\n" "---" "${token}"
         lock_mtoken
+    elif [[ ${mtoken_amount} -lt ${ALLOWED_MIN} ]];
+    then
+        printf "%s Entered amount is lower than acceptable minimum in %s network! Please try again...\n" "---" "${NET_NAME}"
+        lock_mtoken
     else
         echo "--- Delegating stake..."
         delegate_result=$( run_cli srv_stake delegate -cert $CERT -net ${NET_NAME} -w ${WALLETNAME} -value ${mtoken_amount}.0e+18 -fee 0.05e+18 )
@@ -654,8 +701,8 @@ lock_mtoken() {
         if [[ $( echo ${delegate_result} | grep "success" ) ]];
         then
             delegate_hash=$( printf "${delegate_result}\n" | grep tx_hash | cut -d: -f2 )
-            printf "Transaction created successfully. Tx hash: %s\n" "${delegate_hash}" | tee -a $LOG
-            msg_ready
+            printf "Transaction created successfully. Tx hash: %s\n\n" "${delegate_hash}" | tee -a $LOG
+            ask_plugin
         elif [[ $( echo ${delegate_result} | grep "error" ) ]];
         then
             printf "Something went wrong. Transaction was not created.\n" | tee -a $LOG
@@ -663,6 +710,39 @@ lock_mtoken() {
             exit 1
         fi
     fi
+}
+
+ask_plugin()
+{
+    read -p "--- Would you like to install Cellframe masternode WebUI plugin? (Y/N) " _ask_plugin
+
+    if [[ ${_ask_plugin} =~ ^[yY]$ ]];
+    then
+        printf "\nCellframe masternode WebUI plugin is created by hyttmi: https://github.com/hyttmi\n"
+        printf "Github page of the project: https://github.com/hyttmi/cellframe-masternode-webui\n\n"
+        sleep 5
+        install_plugin
+    else
+        msg_ready
+    fi
+}
+
+install_plugin()
+{
+    curl -s https://api.github.com/repos/hyttmi/cellframe-masternode-webui/releases/latest | \
+    grep "tarball_url" | \
+    cut -d ":" -f 2,3 | \
+    tr -d '",' | \
+    xargs curl -L -o cellframe-masternode-webui.tar.gz \
+    && mkdir -p webui \
+    && tar -xvf cellframe-masternode-webui.tar.gz --strip-components=1 -C webui \
+    && cd webui \
+    && sudo ./install.sh
+
+    restart_node
+    verify_node_running
+    printf "Plugin installed successfully! Masternode webUI is available at http://${IP}:${_port_num}/<url chosen during the plugin setup>\n"
+    msg_ready
 }
 
 msg_ready()
@@ -690,6 +770,5 @@ fi
 
 exit
 }
-
 
 check_root
