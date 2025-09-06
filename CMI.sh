@@ -182,7 +182,7 @@ then
 elif [[ -n ${NODE_DEB_LINK} ]];
 then
     printf "Link to the cellframe-node package is provided.\n"
-    check_if_correct_link ${NODE_DEB_LINK}
+    check_if_correct_link "${NODE_DEB_LINK}"
 fi
 }
 
@@ -227,22 +227,22 @@ download_latest()
 {
 ARCH=$(dpkg --print-architecture)
 
-NODE_VERSION=$(curl -v --silent https://pub.cellframe.net/linux/cellframe-node/master/ 2>&1 | grep -oP ">cellframe-node-\K5.3.[0-9]{3}" | sort | tail -n1)
+NODE_VERSION=$(curl -s -I https://pub.cellframe.net/linux/cellframe-node/master/latest-amd64 | grep -oE "cellframe-node-5.[0-9]{1,3}-[0-9]{1,3}")
 printf "Latest available cellframe-node version on pub.cellframe.net: %s\n" "${NODE_VERSION}"
 
 case "$ARCH" in
-  amd64) LATEST_FILE_NAME=$(wget -qO- https://pub.cellframe.net/linux/cellframe-node/master/ | grep -oP "\Kcellframe-node-5.3.[0-9]{3}-rwd-amd64.deb" | sort | tail -n1)
+  amd64) LATEST_FILE_NAME=$(curl -s -I https://pub.cellframe.net/linux/cellframe-node/master/latest-${ARCH} | grep Location | cut -d/ -f7 | tr -d '\r')
   ;;
-  arm64) LATEST_FILE_NAME=$(wget -qO- https://pub.cellframe.net/linux/cellframe-node/master/ | grep -oP "\Kcellframe-node-5.3.[0-9]{3}-arm64.deb" | sort | tail -n1)
+  arm64) LATEST_FILE_NAME=$(curl -s -I https://pub.cellframe.net/linux/cellframe-node/master/latest-${ARCH} | grep Location | cut -d/ -f7 | tr -d '\r')
   ;;
-  armhf) LATEST_FILE_NAME=$(wget -qO- https://pub.cellframe.net/linux/cellframe-node/master/ | grep -oP "\Kcellframe-node-5.3.[0-9]{3}-armhf.deb" | sort | tail -n1)
+  armhf) LATEST_FILE_NAME=$(curl -s -I https://pub.cellframe.net/linux/cellframe-node/master/latest-${ARCH} | grep Location | cut -d/ -f7 | tr -d '\r')
   ;;
   *) echo "Unsupported architecture, exiting..." && exit 1
   ;;
 esac
 
 echo "--- Downloading latest version of Cellframe node..."
-wget -q https://pub.cellframe.net/linux/cellframe-node/master/${LATEST_FILE_NAME}
+wget https://pub.cellframe.net/linux/cellframe-node/master/"${LATEST_FILE_NAME}"
 
 install_node
 }
@@ -613,6 +613,10 @@ do
     then
         printf "\tNode successfully added to %s node list.\n\n" "${NET_NAME}" | tee -a $LOG
         create_diag_data
+    elif [[ $( echo ${publish_result}  | grep "No server" ) ]];
+    then
+        printf "Nodelist is empty. Let's try again in 30 seconds.\n"
+        sleep 30
     else
         printf "Something went wrong while publishing node.\n"
         printf "Publish error:\n"
